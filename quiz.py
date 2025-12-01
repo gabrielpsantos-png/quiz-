@@ -1,39 +1,57 @@
-# quiz.py
 import streamlit as st
 import pandas as pd
 import random
 import io
 from datetime import datetime
+import os
 
+# Configuração da página
 st.set_page_config(page_title="Quiz Interativo", page_icon="📘", layout="centered")
 
-# ---------- Helpers ----------
+# ---------- Funções Auxiliares (Helpers) ----------
 def load_quiz(path="QUIZ.xlsx"):
-    df = pd.read_excel(path)
-    # Ensure expected columns: Pergunta, Resposta (certa) and alternatives
+    # Verifica se o arquivo existe antes de tentar abrir
+    if not os.path.exists(path):
+        st.error(f"O arquivo '{path}' não foi encontrado. Verifique se ele está no repositório.")
+        st.stop()
+        
+    try:
+        df = pd.read_excel(path)
+    except Exception as e:
+        st.error(f"Erro ao ler o arquivo Excel: {e}")
+        st.stop()
+
+    # Garante colunas esperadas
     cols = list(df.columns)
     if "Pergunta" not in cols or "Resposta" not in cols:
-        st.error("Planilha deve conter as colunas 'Pergunta' e 'Resposta'.")
+        st.error("A planilha deve conter as colunas obrigatórias: 'Pergunta' e 'Resposta'.")
         st.stop()
-    # Collect alternative columns (all except Pergunta and Resposta)
+        
+    # Coleta colunas de alternativas (todas exceto Pergunta e Resposta)
     alt_cols = [c for c in cols if c not in ("Pergunta", "Resposta")]
+    
+    # Remove linhas vazias para evitar erros
+    df = df.dropna(how='all')
+    
     return df, alt_cols
 
 def make_question_item(row, alt_cols):
-    # Build list of options (keep non-empty)
     opts = []
-    # prefer canonical A..E if present, else use all alt_cols
-    if set(["A","B","C","D","E"]).issubset(set(alt_cols)):
-        for col in ["A","B","C","D","E"]:
-            if pd.notna(row.get(col)): opts.append(str(row[col]))
+    # Preferência por colunas canônicas A..E se existirem
+    canonical = ["A","B","C","D","E"]
+    if set(canonical).issubset(set(alt_cols)):
+        for col in canonical:
+            if pd.notna(row.get(col)): opts.append(str(row[col]).strip())
     else:
         for col in alt_cols:
-            if pd.notna(row.get(col)): opts.append(str(row[col]))
-    # ensure correct answer included
-    correct = str(row["Resposta"])
+            if pd.notna(row.get(col)): opts.append(str(row[col]).strip())
+            
+    # Garante que a resposta correta esteja inclusa
+    correct = str(row["Resposta"]).strip()
     if correct not in opts:
         opts.append(correct)
-    # remove duplicates and shuffle
+        
+    # Remove duplicatas mantendo a ordem e embaralha
     opts = list(dict.fromkeys(opts))
     random.shuffle(opts)
     return opts, correct
@@ -43,26 +61,31 @@ def to_csv_bytes(results_df):
     results_df.to_csv(buffer, index=False)
     return buffer.getvalue().encode('utf-8')
 
-# ---------- Load data ----------
+# ---------- Carregamento de Dados ----------
 with st.spinner("Carregando perguntas..."):
-    try:
-        df, alt_cols = load_quiz("QUIZ.xlsx")
-    except Exception as e:
-        st.stop()
+    df, alt_cols = load_quiz("QUIZ.xlsx")
 
-# ---------- Sidebar / settings ----------
+if df.empty:
+    st.warning("A planilha foi carregada mas não contém perguntas.")
+    st.stop()
+
+# ---------- Barra Lateral / Configurações ----------
 st.sidebar.title("Configurações")
 qtd_default = min(10, len(df))
 qtd = st.sidebar.number_input("Quantas questões?", min_value=1, max_value=len(df), value=qtd_default, step=1)
 mode = st.sidebar.selectbox("Modo", ["Treino (feedback imediato)", "Prova (mostrar nota só no final)"])
 shuffle_questions = st.sidebar.checkbox("Embaralhar perguntas", value=True)
 show_progress = st.sidebar.checkbox("Mostrar barra de progresso", value=True)
-add_timer = st.sidebar.checkbox("Tempo por questão (segundos) — experimental", value=False)
+
+if st.sidebar.button("Reiniciar Quiz"):
+    for key in st.session_state.keys():
+        del st.session_state[key]
+    st.rerun()
 
 st.title("📘 Quiz Interativo")
-st.markdown("Escolha a quantidade de questões, clique em **Iniciar** e responda. Ao final, veja resultado e exporte o gabarito.")
+st.markdown("Escolha a quantidade de questões na barra lateral e clique em **Iniciar**.")
 
-# ---------- Session state ----------
+# ---------- Estado da Sessão (Session State) ----------
 if "started" not in st.session_state:
     st.session_state.started = False
 if "order" not in st.session_state:
@@ -75,98 +98,133 @@ if "correct_count" not in st.session_state:
     st.session_state.correct_count = 0
 if "shuffled_options" not in st.session_state:
     st.session_state.shuffled_options = []
-if "start_time" not in st.session_state:
-    st.session_state.start_time = None
 
-# ---------- Start quiz ----------
+# ---------- Iniciar Quiz ----------
 if not st.session_state.started:
-    if st.button("Iniciar Quiz"):
-        pool = df.sample(len(df)).reset_index(drop=True) if shuffle_questions else df.copy().reset_index(drop=True)
+    if st.button("Iniciar Quiz", type="primary"):
+        # Lógica de seleção
+        if shuffle_questions:
+            pool = df.sample(n=len(df)).reset_index(drop=True)
+        else:
+            pool = df.copy().reset_index(drop=True)
+            
         st.session_state.order = pool.iloc[:qtd].reset_index(drop=True)
         st.session_state.index = 0
         st.session_state.picks = [None] * qtd
         st.session_state.correct_count = 0
         st.session_state.shuffled_options = [None] * qtd
         st.session_state.started = True
-        st.session_state.start_time = datetime.now().isoformat()
-        st.experimental_rerun()
+        st.rerun()
     else:
-        st.info("Clique em **Iniciar Quiz** na barra esquerda quando estiver pronto.")
+        st.info("Configure as opções ao lado e clique em **Iniciar Quiz**.")
         st.stop()
 
-# ---------- Quiz flow ----------
+# ---------- Fluxo do Quiz ----------
 cur_i = st.session_state.index
 total_q = len(st.session_state.order)
 
+# Tela de Finalização
 if cur_i >= total_q:
-    # Finished
-    st.success(f"Quiz finalizado — você acertou {st.session_state.correct_count} de {total_q} ({(st.session_state.correct_count/total_q)*100:.1f}%)")
+    # CORREÇÃO 1: Evitar divisão por zero
+    if total_q > 0:
+        percent = (st.session_state.correct_count / total_q) * 100
+    else:
+        percent = 0.0
+        
+    st.success(f"Quiz finalizado — você acertou {st.session_state.correct_count} de {total_q} ({percent:.1f}%)")
     st.write("---")
     st.subheader("Detalhes e Gabarito")
-    # Build results dataframe
+    
+    # Construir dataframe de resultados
     rows = []
     for i in range(total_q):
-        row = st.session_state.order.iloc[i]
-        opts = st.session_state.shuffled_options[i] or []
+        row_data = st.session_state.order.iloc[i]
+        # Recupera opções salvas ou vazio
         pick = st.session_state.picks[i]
-        correct = str(row["Resposta"])
+        correct = str(row_data["Resposta"]).strip()
+        
         rows.append({
             "N°": i+1,
-            "Pergunta": row["Pergunta"],
-            "Escolha": pick if pick is not None else "",
+            "Pergunta": row_data["Pergunta"],
+            "Sua Escolha": pick if pick is not None else "Não respondido",
             "Correta": correct,
             "Acertou": (pick == correct)
         })
+        
     results_df = pd.DataFrame(rows)
-    # Visual summary
-    st.dataframe(results_df.style.applymap(lambda v: 'background-color: #d4edda' if v is True else None, subset=["Acertou"]))
-    # Export CSV button
+    
+    # CORREÇÃO 2: Substituir applymap (depreciado) por map e corrigir KeyError
+    def highlight_correct(val):
+        return 'background-color: #d4edda' if val is True else ''
+
+    st.dataframe(
+        results_df.style.map(highlight_correct, subset=["Acertou"]),
+        use_container_width=True
+    )
+    
+    # Botão de exportação
     csv_bytes = to_csv_bytes(results_df)
     st.download_button("📥 Exportar resultados (CSV)", data=csv_bytes, file_name="quiz_result.csv", mime="text/csv")
-    # Reset button
+    
     if st.button("Refazer Quiz"):
         st.session_state.started = False
         st.session_state.index = 0
         st.session_state.picks = []
         st.session_state.correct_count = 0
         st.session_state.shuffled_options = []
-        st.experimental_rerun()
+        st.rerun()
     st.stop()
 
-# Show current question
+# Mostrar questão atual
 row = st.session_state.order.iloc[cur_i]
 st.header(f"Questão {cur_i+1} / {total_q}")
 st.write(row["Pergunta"])
 
-# Prepare options & store them in session so UI remains stable across reruns
+# Preparar opções e armazenar na sessão
 if st.session_state.shuffled_options[cur_i] is None:
     opts, correct = make_question_item(row, alt_cols)
     st.session_state.shuffled_options[cur_i] = opts
 else:
     opts = st.session_state.shuffled_options[cur_i]
-    correct = str(row["Resposta"])
+    correct = str(row["Resposta"]).strip()
 
-# Option display (lettered)
+# Exibir opções com letras (A, B, C...)
 letters = [chr(65 + i) for i in range(len(opts))]
 labelled_opts = [f"{letters[i]}) {opts[i]}" for i in range(len(opts))]
 
-# If user already picked, select that radio option
-initial_choice = None
-if st.session_state.picks[cur_i] is not None:
-    initial_choice = st.session_state.picks[cur_i]
+# Recuperar escolha prévia para manter o radio button correto
+initial_choice_text = st.session_state.picks[cur_i] # Ex: "Resposta X"
+initial_index = 0
 
-choice = st.radio("Escolha uma alternativa:", options=labelled_opts, index=labelled_opts.index(initial_choice) if initial_choice in labelled_opts else 0, key=f"q{cur_i}")
+# Lógica para encontrar o índice correto baseado no texto salvo
+if initial_choice_text is not None:
+    # Procura qual opção termina com o texto salvo
+    for idx, opt_label in enumerate(labelled_opts):
+        if opt_label.endswith(f") {initial_choice_text}"):
+            initial_index = idx
+            break
 
-# Save selection into session-friendly plaintext (strip "X) " prefix)
-selected_text = choice.split(") ", 1)[1] if ") " in choice else choice
+choice = st.radio(
+    "Escolha uma alternativa:", 
+    options=labelled_opts, 
+    index=initial_index, 
+    key=f"q_radio_{cur_i}"
+)
+
+# Salvar seleção na sessão (apenas o texto, sem "A) ")
+if ") " in choice:
+    selected_text = choice.split(") ", 1)[1]
+else:
+    selected_text = choice
+
 st.session_state.picks[cur_i] = selected_text
 
-# Show progress
+# Barra de progresso
 if show_progress:
-    progress = (cur_i) / total_q
+    progress = (cur_i) / total_q if total_q > 0 else 0
     st.progress(progress)
 
-# Immediate feedback in training mode
+# Navegação e Lógica de Modos
 if mode.startswith("Treino"):
     if st.button("Confirmar resposta e próxima"):
         if selected_text == correct:
@@ -174,28 +232,35 @@ if mode.startswith("Treino"):
             st.session_state.correct_count += 1
         else:
             st.error("❌ Incorreto")
-            st.write(f"Resposta correta: **{correct}**")
+            st.markdown(f"Resposta correta: **{correct}**")
+            
         st.session_state.index += 1
-        st.experimental_rerun()
+        st.rerun()
 else:
-    # Prova mode: just navigate
-    col1, col2, col3 = st.columns([1,2,1])
+    # Modo Prova
+    col1, col2, col3 = st.columns([1, 2, 1])
     with col1:
         if st.button("Anterior") and cur_i > 0:
             st.session_state.index -= 1
-            st.experimental_rerun()
+            st.rerun()
     with col3:
         if st.button("Próxima"):
             st.session_state.index += 1
-            st.experimental_rerun()
+            st.rerun()
+            
     st.write("---")
-    if st.button("Finalizar prova e ver resultado"):
-        # compute score
+    if st.button("Finalizar prova e ver resultado", type="primary"):
+        # Calcular pontuação final
         correct_count = 0
         for i in range(total_q):
-            row_i = st.session_state.order.iloc[i]
-            if st.session_state.picks[i] == str(row_i["Resposta"]):
+            r_row = st.session_state.order.iloc[i]
+            # Garante comparação segura de strings
+            r_correct = str(r_row["Resposta"]).strip()
+            r_pick = st.session_state.picks[i]
+            
+            if r_pick == r_correct:
                 correct_count += 1
+                
         st.session_state.correct_count = correct_count
-        st.session_state.index = total_q
-        st.experimental_rerun()
+        st.session_state.index = total_q # Força ir para tela final
+        st.rerun()
