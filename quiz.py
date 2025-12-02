@@ -1,9 +1,8 @@
 import streamlit as st
 import pandas as pd
 import random
-import io
-from datetime import datetime
 import os
+from datetime import datetime
 
 # ============================================================
 #                 CONFIG DA PÁGINA
@@ -24,13 +23,15 @@ def load_quiz(path="QUIZ.xlsx"):
         st.stop()
 
     df = pd.read_excel(path)
+    df = df.dropna(how="all")
+
     if "Pergunta" not in df.columns or "Resposta" not in df.columns:
         st.error("A planilha deve conter as colunas: Pergunta e Resposta.")
         st.stop()
 
-    alt_cols = [c for c in df.columns if c not in ["Pergunta", "Resposta"]]
-    df = df.dropna(how="all")
-    return df, alt_cols
+    alternativas = [c for c in df.columns if c not in ["Pergunta", "Resposta"]]
+    return df, alternativas
+
 
 def shuffle_options(row, alt_cols):
     opts = []
@@ -40,6 +41,7 @@ def shuffle_options(row, alt_cols):
             opts.append(str(row[col]).strip())
 
     correct = str(row["Resposta"]).strip()
+
     if correct not in opts:
         opts.append(correct)
 
@@ -47,11 +49,12 @@ def shuffle_options(row, alt_cols):
     random.shuffle(opts)
     return opts, correct
 
+
 def save_result(name, score, total, xp, mode):
     path = "ranking.csv"
     now = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-    new_row = {
+    new_row = pd.DataFrame([{
         "Nome": name,
         "Modo": mode,
         "Pontuação": score,
@@ -59,13 +62,13 @@ def save_result(name, score, total, xp, mode):
         "Porcentagem": round((score / total) * 100, 2),
         "XP": xp,
         "Data": now
-    }
+    }])
 
     if os.path.exists(path):
         old = pd.read_csv(path)
-        df = pd.concat([old, pd.DataFrame([new_row])], ignore_index=True)
+        df = pd.concat([old, new_row], ignore_index=True)
     else:
-        df = pd.DataFrame([new_row])
+        df = new_row
 
     df.to_csv(path, index=False)
 
@@ -77,8 +80,7 @@ def load_ranking():
 
 
 def get_level(xp):
-    level = xp // 200
-    return level
+    return xp // 200
 
 
 # ============================================================
@@ -94,9 +96,29 @@ menu = st.sidebar.radio(
 df, alt_cols = load_quiz("QUIZ.xlsx")
 
 # ============================================================
-#                MODO 1 — QUIZ NORMAL
+#            SISTEMA DE ESTADO — SEM RESET
+# ============================================================
+
+if "quiz_data" not in st.session_state:
+    st.session_state.quiz_data = None
+if "cur_q" not in st.session_state:
+    st.session_state.cur_q = 0
+if "answers" not in st.session_state:
+    st.session_state.answers = []
+if "mode" not in st.session_state:
+    st.session_state.mode = None
+
+
+# ============================================================
+#                    MODO QUIZ NORMAL
 # ============================================================
 if menu == "🏁 Jogar Quiz":
+
+    if st.session_state.mode != "quiz":
+        st.session_state.quiz_data = None
+        st.session_state.cur_q = 0
+        st.session_state.answers = []
+        st.session_state.mode = "quiz"
 
     st.header("📘 Iniciar Quiz")
 
@@ -104,122 +126,155 @@ if menu == "🏁 Jogar Quiz":
     dificuldade = st.selectbox("Dificuldade", ["Fácil", "Médio", "Difícil"])
     qtd = st.slider("Quantidade de questões", 5, min(30, len(df)), 10)
 
-    iniciar = st.button("COMEÇAR 🔥")
+    if st.button("COMEÇAR 🔥") and name:
+        st.session_state.quiz_data = df.sample(qtd).reset_index(drop=True)
+        st.session_state.cur_q = 0
+        st.session_state.answers = []
 
-    if iniciar:
-        if not name:
-            st.error("Digite seu nome para iniciar.")
-            st.stop()
+    # ----- Se o quiz já começou -----
+    if st.session_state.quiz_data is not None:
 
-        perguntas = df.sample(qtd).reset_index(drop=True)
+        cur = st.session_state.cur_q
+        perguntas = st.session_state.quiz_data
 
-        score = 0
+        if cur < len(perguntas):
 
-        for i in range(qtd):
-            st.subheader(f"❓ Questão {i+1}/{qtd}")
-            row = perguntas.iloc[i]
+            row = perguntas.iloc[cur]
             opts, correct = shuffle_options(row, alt_cols)
 
-            choice = st.radio(row["Pergunta"], opts)
-            if choice == correct:
-                score += 1
+            st.subheader(f"❓ Questão {cur+1}/{len(perguntas)}")
 
-        st.success(f"Você acertou {score}/{qtd} ({score/qtd*100:.1f}%)")
+            choice = st.radio(row["Pergunta"], opts, key=f"quiz_{cur}")
 
-        # XP por dificuldade
-        xp_gain = {
-            "Fácil": 10,
-            "Médio": 20,
-            "Difícil": 40
-        }[dificuldade] * score
+            if st.button("Confirmar resposta"):
+                st.session_state.answers.append(choice)
+                st.session_state.cur_q += 1
+                st.rerun()
 
-        st.info(f"XP ganho: **{xp_gain} XP**")
+        else:
+            # ---- FINAL ----
+            score = sum(
+                1 for i, row in enumerate(perguntas.itertuples())
+                if st.session_state.answers[i] == str(row.Resposta).strip()
+            )
 
-        save_result(name, score, qtd, xp_gain, mode="Quiz Normal")
+            xp_gain = {
+                "Fácil": 10,
+                "Médio": 20,
+                "Difícil": 40
+            }[dificuldade] * score
 
-        st.balloons()
+            st.success(f"Você fez {score}/{len(perguntas)} acertos!")
+            st.info(f"Ganhou **{xp_gain} XP**")
 
+            save_result(name, score, len(perguntas), xp_gain, "Quiz Normal")
+
+            if st.button("Refazer Quiz"):
+                for key in ["quiz_data", "answers", "cur_q", "mode"]:
+                    st.session_state[key] = None
+                st.rerun()
 
 
 # ============================================================
-#              MODO 2 — BATALHA 1x1
+#              MODO 2 — BATALHA 1x1 (SEM BUGS)
 # ============================================================
 if menu == "⚔️ Batalha 1x1":
 
-    st.header("⚔️ Batalha de Conhecimento 1 vs 1")
+    if st.session_state.mode != "battle":
+        st.session_state.quiz_data = None
+        st.session_state.cur_q = 0
+        st.session_state.answers = []
+        st.session_state.mode = "battle"
+
+    st.header("⚔️ Batalha 1x1")
 
     p1 = st.text_input("Jogador 1")
     p2 = st.text_input("Jogador 2")
     qtd = st.slider("Quantidade de questões", 5, 30, 10)
 
-    iniciar = st.button("INICIAR BATALHA ⚔️")
+    if st.button("INICIAR BATALHA ⚔️") and p1 and p2:
+        st.session_state.quiz_data = df.sample(qtd).reset_index(drop=True)
+        st.session_state.cur_q = 0
+        st.session_state.answers = []
 
-    if iniciar:
-        if not p1 or not p2:
-            st.error("Informe os nomes dos jogadores.")
-            st.stop()
+    if st.session_state.quiz_data is not None:
 
-        perguntas = df.sample(qtd).reset_index(drop=True)
-        score1 = score2 = 0
+        cur = st.session_state.cur_q
+        perguntas = st.session_state.quiz_data
 
-        for i in range(qtd):
-            row = perguntas.iloc[i]
+        if cur < len(perguntas):
+
+            row = perguntas.iloc[cur]
             opts, correct = shuffle_options(row, alt_cols)
 
-            st.subheader(f"❓ Questão {i+1}/{qtd}")
+            st.subheader(f"❓ Questão {cur+1}/{len(perguntas)}")
 
             col1, col2 = st.columns(2)
 
             with col1:
-                resp1 = st.radio(f"{p1}", opts, key=f"{i}_1")
+                r1 = st.radio(p1, opts, key=f"b1_{cur}")
             with col2:
-                resp2 = st.radio(f"{p2}", opts, key=f"{i}_2")
+                r2 = st.radio(p2, opts, key=f"b2_{cur}")
 
-            if resp1 == correct:
-                score1 += 1
-            if resp2 == correct:
-                score2 += 1
+            if st.button("Confirmar respostas"):
+                st.session_state.answers.append((r1, r2))
+                st.session_state.cur_q += 1
+                st.rerun()
 
-        st.success(f"🎉 Resultado: {p1} {score1} x {score2} {p2}")
-
-        xp1 = score1 * 25
-        xp2 = score2 * 25
-
-        save_result(p1, score1, qtd, xp1, "Batalha")
-        save_result(p2, score2, qtd, xp2, "Batalha")
-
-        if score1 > score2:
-            st.success(f"🏆 **{p1} VENCEU A BATALHA!**")
-        elif score2 > score1:
-            st.success(f"🏆 **{p2} VENCEU A BATALHA!**")
         else:
-            st.info("🤝 EMPATE")
+            # ---- FINAL ----
+            score1 = 0
+            score2 = 0
+
+            for i, row in enumerate(perguntas.itertuples()):
+                correct = str(row.Resposta).strip()
+                r1, r2 = st.session_state.answers[i]
+                if r1 == correct:
+                    score1 += 1
+                if r2 == correct:
+                    score2 += 1
+
+            st.success(f"🎉 Resultado: {p1} {score1} x {score2} {p2}")
+
+            xp1 = score1 * 25
+            xp2 = score2 * 25
+
+            save_result(p1, score1, len(perguntas), xp1, "Batalha")
+            save_result(p2, score2, len(perguntas), xp2, "Batalha")
+
+            if score1 > score2:
+                st.success(f"🏆 {p1} venceu!")
+            elif score2 > score1:
+                st.success(f"🏆 {p2} venceu!")
+            else:
+                st.info("🤝 Empate!")
+
+            if st.button("Nova Batalha"):
+                for key in ["quiz_data", "answers", "cur_q", "mode"]:
+                    st.session_state[key] = None
+                st.rerun()
 
 
 # ============================================================
 #                 RANKING GERAL
 # ============================================================
 if menu == "🏅 Ranking Geral":
-    st.header("🏅 Ranking Geral de Jogadores")
+    st.header("🏅 Ranking Geral")
 
     ranking = load_ranking()
 
     if ranking.empty:
-        st.info("Ainda não há resultados registrados.")
+        st.info("Nenhum jogo registrado ainda.")
         st.stop()
 
-    # Ordenar por XP total
     ranking["XP Total"] = ranking.groupby("Nome")["XP"].transform("sum")
-    ranking_unique = ranking[["Nome", "XP Total"]].drop_duplicates()
-    ranking_unique = ranking_unique.sort_values("XP Total", ascending=False).reset_index(drop=True)
 
-    # Adicionar níveis
-    ranking_unique["Nível"] = ranking_unique["XP Total"].apply(get_level)
+    unique = ranking[["Nome", "XP Total"]].drop_duplicates()
+    unique["Nível"] = unique["XP Total"] // 200
+    unique = unique.sort_values("XP Total", ascending=False)
 
-    st.dataframe(ranking_unique)
+    st.dataframe(unique)
 
-    # Medalhas
-    for i, row in ranking_unique.head(3).iterrows():
+    for i, row in unique.head(3).iterrows():
         medal = ["🥇", "🥈", "🥉"][i]
         st.markdown(f"### {medal} {row['Nome']} — {row['XP Total']} XP (Nível {row['Nível']})")
-
