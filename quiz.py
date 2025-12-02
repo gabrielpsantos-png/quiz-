@@ -265,3 +265,4 @@ else:
         st.session_state.index = total_q # Força ir para tela final
         st.rerun()
 
+
