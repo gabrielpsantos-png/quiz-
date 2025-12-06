@@ -4,6 +4,7 @@ import random
 import os
 import hashlib
 import json
+import time # Importado para o Timer
 from datetime import datetime
 
 # ============================================================
@@ -58,7 +59,7 @@ def login(usuario, senha):
 
 def load_quiz(path=QUIZ_FILE):
     if not os.path.exists(path):
-        st.error("Arquivo QUIZ.xlsx não encontrado!")
+        st.error("Arquivo QUIZ.xlsx não encontrado! Crie um arquivo Excel com colunas 'Pergunta' e 'Resposta'.")
         st.stop()
 
     df = pd.read_excel(path).dropna(how="all")
@@ -176,13 +177,24 @@ if "cur_q" not in st.session_state:
     st.session_state.cur_q = 0
 if "answers" not in st.session_state:
     st.session_state.answers = []
+if "start_time" not in st.session_state:
+    st.session_state.start_time = None
+if "time_limit" not in st.session_state:
+    st.session_state.time_limit = 0
 
 if menu == "🏁 Jogar Quiz":
 
+    # --- CONFIGURAÇÃO INICIAL DO QUIZ ---
     if st.session_state.quiz_data is None:
         st.header("📘 Configuração do Quiz")
 
-        dificuldade = st.selectbox("Dificuldade", ["Fácil", "Médio", "Difícil"])
+        col1, col2 = st.columns(2)
+        with col1:
+            dificuldade = st.selectbox("Dificuldade", ["Fácil", "Médio", "Difícil"])
+        with col2:
+            # ADAPTAÇÃO 2: Escolha de segundos por questão
+            segundos = st.number_input("Segundos por questão (0 = Sem tempo)", min_value=0, max_value=300, value=0, step=5)
+
         max_q = min(30, len(df))
         qtd = st.slider("Quantidade de questões", 1, max_q, 5)
 
@@ -202,70 +214,120 @@ if menu == "🏁 Jogar Quiz":
             st.session_state.cur_q = 0
             st.session_state.answers = []
             st.session_state.difficulty = dificuldade
+            st.session_state.time_limit = segundos # Salva o tempo limite
+            st.session_state.start_time = None # Reseta o timer
             st.rerun()
 
+    # --- EXECUÇÃO DO QUIZ ---
     else:
         cur = st.session_state.cur_q
         perguntas = st.session_state.quiz_data
+        limit = st.session_state.time_limit
 
         if cur < len(perguntas):
             q = perguntas[cur]
 
+            # Inicia o timer se ainda não iniciou para essa questão
+            if st.session_state.start_time is None:
+                st.session_state.start_time = time.time()
+
+            # Mostra progresso e timer
             st.progress(cur/len(perguntas))
-            st.subheader(f"❓ Questão {cur+1}/{len(perguntas)}")
+            
+            # Cabeçalho com Timer
+            col_h1, col_h2 = st.columns([3, 1])
+            with col_h1:
+                st.subheader(f"❓ Questão {cur+1}/{len(perguntas)}")
+            with col_h2:
+                if limit > 0:
+                    st.markdown(f"⏱️ **Limite: {limit}s**")
+
             st.write(f"**{q['pergunta']}**")
 
             choice = st.radio("Escolha:", q["opcoes"], key=f"quiz_{cur}")
 
             if st.button("Confirmar resposta"):
-                st.session_state.answers.append(choice)
+                # Verifica Tempo
+                tempo_esgotado = False
+                if limit > 0:
+                    elapsed = time.time() - st.session_state.start_time
+                    if elapsed > limit:
+                        tempo_esgotado = True
+                        st.toast("⚠️ Tempo esgotado! Resposta anulada.", icon="⏰")
+                
+                # Lógica de salvar resposta
+                if tempo_esgotado:
+                    st.session_state.answers.append("TEMPO_ESGOTADO")
+                else:
+                    st.session_state.answers.append(choice)
+
+                # Prepara próxima questão
                 st.session_state.cur_q += 1
+                st.session_state.start_time = None # Reseta timer para próxima
                 st.rerun()
 
+        # --- TELA DE RESULTADOS ---
         else:
-            score = sum(
-                1 for i, p in enumerate(perguntas)
-                if st.session_state.answers[i] == p["resposta"]
-            )
+            score = 0
+            # Calcula score ignorando timeouts e erros
+            for i, p in enumerate(perguntas):
+                if st.session_state.answers[i] == p["resposta"]:
+                    score += 1
 
             xp_gain = {"Fácil": 10, "Médio": 20, "Difícil": 40}[st.session_state.difficulty]
             xp_gain *= score
 
             st.balloons()
-            st.success(f"Você fez {score}/{len(perguntas)} acertos!")
+            st.success(f"Fim de jogo! Você acertou {score} de {len(perguntas)}.")
             st.info(f"XP ganho: **{xp_gain} XP**")
 
+            # Salva no Ranking
             save_result(st.session_state.user, score, len(perguntas), xp_gain, "Quiz Normal")
 
+            # ADAPTAÇÃO 1: Mostrar Detalhes (Erros e Acertos)
+            st.write("---")
+            st.subheader("📝 Revisão da Partida")
+            
+            for i, p in enumerate(perguntas):
+                user_ans = st.session_state.answers[i]
+                correct_ans = p["resposta"]
+                
+                with st.expander(f"Questão {i+1}: {p['pergunta']}"):
+                    if user_ans == correct_ans:
+                        st.markdown(f"✅ **Você acertou!** Resposta: {user_ans}")
+                    elif user_ans == "TEMPO_ESGOTADO":
+                        st.markdown(f"⏰ **Tempo Esgotado!**")
+                        st.markdown(f"A resposta correta era: **{correct_ans}**")
+                    else:
+                        st.markdown(f"❌ **Você errou.** Sua escolha: {user_ans}")
+                        st.markdown(f"A resposta correta era: **{correct_ans}**")
+
+            st.write("---")
             if st.button("Jogar Novamente"):
                 st.session_state.quiz_data = None
                 st.session_state.cur_q = 0
                 st.session_state.answers = []
+                st.session_state.start_time = None
                 st.rerun()
 
 
 # ============================================================
 #                  DESAFIAR OUTRO JOGADOR
 # ============================================================
+# (Mantido igual, apenas para contexto)
 
 def load_desafios():
     if not os.path.exists(DESAFIOS_FILE):
-        return pd.DataFrame(columns=[
-            "id","desafiante","desafiado","status",
-            "perguntas","resp1","resp2"
-        ])
+        return pd.DataFrame(columns=["id","desafiante","desafiado","status","perguntas","resp1","resp2"])
     return pd.read_csv(DESAFIOS_FILE)
 
 def save_desafios(df):
     df.to_csv(DESAFIOS_FILE, index=False)
 
 if menu == "⚔️ Desafiar Jogador":
-
     st.header("⚔️ Desafiar Jogador")
-
     ranking = load_ranking()
     usuarios = ranking["usuario"].drop_duplicates().tolist()
-
     usuarios = [u for u in usuarios if u != st.session_state.user]
 
     if not usuarios:
@@ -278,7 +340,6 @@ if menu == "⚔️ Desafiar Jogador":
     if st.button("Enviar Desafio ⚔️"):
         raw = df.sample(qtd).reset_index(drop=True)
         perguntas = []
-
         for _, row in raw.iterrows():
             opts, correct = shuffle_options(row, alt_cols)
             perguntas.append({
@@ -288,7 +349,6 @@ if menu == "⚔️ Desafiar Jogador":
             })
 
         desafios = load_desafios()
-
         novo = pd.DataFrame([{
             "id": len(desafios)+1,
             "desafiante": st.session_state.user,
@@ -298,26 +358,17 @@ if menu == "⚔️ Desafiar Jogador":
             "resp1": "",
             "resp2": ""
         }])
-
         desafios = pd.concat([desafios, novo], ignore_index=True)
         save_desafios(desafios)
-
         st.success("Desafio enviado!")
 
-
 # ============================================================
-#                  DESAFIOS RECEBIDOS
+#                  DESAFIOS RECEBIDOS (RESUMO)
 # ============================================================
-
 if menu == "📥 Desafios Recebidos":
-
     st.header("📥 Desafios Recebidos")
-
     desafios = load_desafios()
-    meus = desafios[
-        (desafios["desafiado"] == st.session_state.user) &
-        (desafios["status"] == "pendente")
-    ]
+    meus = desafios[(desafios["desafiado"] == st.session_state.user) & (desafios["status"] == "pendente")]
 
     if meus.empty:
         st.info("Nenhum desafio recebido.")
@@ -325,9 +376,6 @@ if menu == "📥 Desafios Recebidos":
 
     id_select = st.selectbox("Desafios pendentes (ID):", meus["id"].tolist())
     row = meus[meus["id"] == id_select].iloc[0]
-
-    st.write(f"Desafiante: **{row['desafiante']}**")
-
     perguntas = json.loads(row["perguntas"])
 
     if "duelo_q" not in st.session_state:
@@ -338,58 +386,47 @@ if menu == "📥 Desafios Recebidos":
 
     if cur < len(perguntas):
         q = perguntas[cur]
-
         st.subheader(f"Questão {cur+1}/{len(perguntas)}")
         st.write(f"**{q['pergunta']}**")
-
         choice = st.radio("Selecione:", q["opcoes"], key=f"dq{cur}")
-
         if st.button("Responder"):
             st.session_state.duelo_ans.append(choice)
             st.session_state.duelo_q += 1
             st.rerun()
-
     else:
         corretas = 0
         for i, q in enumerate(perguntas):
             if st.session_state.duelo_ans[i] == q["correta"]:
                 corretas += 1
-
+        
+        # Atualiza CSV
         desafios.loc[desafios["id"] == id_select, "resp2"] = ";".join(st.session_state.duelo_ans)
         desafios.loc[desafios["id"] == id_select, "status"] = "respondido"
-
         save_desafios(desafios)
-
+        
+        # Salva Ranking
         xp = corretas * 30
         save_result(st.session_state.user, corretas, len(perguntas), xp, "Desafio Recebido")
-
-        st.success(f"Você fez {corretas}/{len(perguntas)}! Resultado enviado.")
+        
+        # MOSTRA RESULTADO DO DUELO
+        st.success(f"Desafio concluído! Acertos: {corretas}/{len(perguntas)}")
+        
+        # RESET
         st.session_state.duelo_q = 0
         st.session_state.duelo_ans = []
-
 
 # ============================================================
 #                       RANKING GERAL
 # ============================================================
-
 if menu == "🏅 Ranking Geral":
-
     st.header("🏅 Ranking Geral")
-
     ranking = load_ranking()
-
     if ranking.empty:
         st.info("Nenhum jogo registrado ainda.")
-        st.stop()
+    else:
+        ranking["xp_total"] = ranking.groupby("usuario")["xp"].transform("sum")
+        unique = ranking[["usuario","xp_total"]].drop_duplicates()
+        unique["nivel"] = unique["xp_total"] // 200
+        unique = unique.sort_values("xp_total", ascending=False).reset_index(drop=True)
+        st.dataframe(unique, use_container_width=True)
 
-    ranking["xp_total"] = ranking.groupby("usuario")["xp"].transform("sum")
-    unique = ranking[["usuario","xp_total"]].drop_duplicates()
-    unique["nivel"] = unique["xp_total"] // 200
-    unique = unique.sort_values("xp_total", ascending=False).reset_index(drop=True)
-
-    st.dataframe(unique, use_container_width=True)
-
-    st.subheader("Top 3")
-    for i, row in unique.head(3).iterrows():
-        medal = ["🥇","🥈","🥉"][i]
-        st.markdown(f"### {medal} {row['usuario']} — {row['xp_total']} XP (Nível {row['nivel']})")
